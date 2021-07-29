@@ -1,0 +1,155 @@
+pipeline {
+    agent any
+
+    environment {
+        TORADEX_REPO_URL = "https://git.toradex.com/toradex-manifest.git \
+        -b dunfell-5.x.y -m tdxref/default.xml"
+        YOCTO_CACHE_DIR = "/var/jenkins_home/yocto"
+        CQFD_EXTRA_RUN_ARGS = "-v ${YOCTO_CACHE_DIR}/dl:/mnt/dl -e DL_DIR=/mnt/dl \
+        -v ${YOCTO_CACHE_DIR}/sstate:/mnt/sstate -e SSTATE_DIR=/mnt/sstate"
+        GIT_SSH_COMMAND = "ssh -o StrictHostKeyChecking=no"
+        ANSIBLE_HOST_KEY_CHECKING = "False"
+        BUILD_DIR = "build/tmp/deploy/images"
+        TFTP_DIR = "/var/jenkins_home/tftp"
+        NFS_DIR = "/var/jenkins_home/nfs"
+        TIMESTAMP = sh(script: """echo `date +%s%3N`""", returnStdout: true).trim()
+    }
+
+    stages {
+
+        stage("1. Prepare workspace") {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage("2. Prepare build environment") {
+            steps {
+                script {
+                    stage("2.1. Fetch toradex sources") {
+                        sh """
+                            repo init -u \$TORADEX_REPO_URL
+                            repo sync
+                        """
+                    }
+                    stage("2.2. Fetch base CI") {
+                        sh """
+                            git clone https://github.com/savoirfairelinux/base_ci.git
+                            """
+                        }
+                    }
+                    stage("2.3. Fetch bash tools") {
+                        sh"""
+                            mkdir -p base_ci/cqfd/scripts
+                            cd base_ci/cqfd/scripts
+                            git clone https://github.com/savoirfairelinux/bash_scripting_tools.git
+                        """
+                    }
+                    stage("2.4. Prepare CQFD") {
+                        sh """
+                            # Move CQFD to root build dir
+                            mv base_ci/cqfd/* .
+                            mv base_ci/cqfd/.cqfd* .
+                            mv layers sources
+
+                            # Initialize CQFD
+                            cqfd init
+                            """
+                    }
+                    stage("2.5. Fetch cukinia repo") {
+                        sh"""
+                            git clone https://github.com/savoirfairelinux/cukinia.git
+                        """
+                    }
+                }
+            }
+        }
+
+        stage("3. Build image") {
+            steps {
+                script {
+                    sh """
+                        # Add Python3 before build (Ansible requirement)
+                        cqfd run ./build.sh -v -m apalis-imx6 --distro tdx-x11 \
+                            -i tdx-reference-minimal-image \
+                            -- echo "source poky environment"
+                        echo 'CORE_IMAGE_EXTRA_INSTALL += "python3"' >> build/conf/local.conf
+                        cqfd run ./build.sh -v -m apalis-imx6 \
+                        --distro tdx-x11 -i tdx-reference-minimal-image
+
+                        # Copy kernel and dtb to TFTP shared folder
+                        cp ${BUILD_DIR}/apalis-imx6/zImage ${TFTP_DIR}
+                        cp ${BUILD_DIR}/apalis-imx6/imx6q-apalis-eval.dtb ${TFTP_DIR}
+
+                        # Extract rootfs into a folder with timestamp
+                        mkdir -p ${NFS_DIR}/rootfs_${TIMESTAMP}
+                        sudo tar --same-owner \
+                            -xf ${BUILD_DIR}/apalis-imx6/apalis-imx6_Reference-Minimal-Image-x11.rootfs.tar.xz \
+                            -C ${NFS_DIR}/rootfs_${TIMESTAMP}
+
+                        # Generate script to be used by U-Boot to get the last rootfs
+                        echo "setenv rootfs_name rootfs_${TIMESTAMP}" \
+                        > ${TFTP_DIR}/nfs_script_timestamp
+                        mkimage -T script -C none -n 'Rootfs Name Script' \
+                            -d ${TFTP_DIR}/nfs_script_timestamp \
+                            ${TFTP_DIR}/nfs_script_timestamp.img
+                    """
+                }
+            }
+        }
+
+        stage("4. Reboot target") {
+            steps {
+                script {
+                    sh """
+                        cd base_ci/ansible
+                        ansible-playbook playbooks/ci_restart_machine.yaml \
+                            -i inventories/target_machine.yaml
+                        """
+                }
+            }
+        }
+
+        stage("5. Test") {
+            steps {
+                script {
+                    sh"""
+                        cd base_ci/ansible
+                        ansible-playbook playbooks/ci_common_tests.yaml \
+                            -i inventories/target_machine.yaml \
+                            -e rootfs_name_var=rootfs_${TIMESTAMP}
+                    """
+                    junit "base_ci/ansible/playbooks/common/cukinia_common.xml"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Test succeed. Remove older rootfs."
+            script {
+                sh"""
+                    sudo find ${NFS_DIR} -type d \
+                        -name 'rootfs*' \
+                        -not -name '*${TIMESTAMP}' \
+                        -prune -exec rm -r {} \\;
+                """
+            }
+        }
+        unstable {
+            echo "Test did not succeed. Remove older rootfs."
+            script {
+                sh"""
+                    sudo find ${NFS_DIR} -type d \
+                        -name 'rootfs*' \
+                        -not -name '*${TIMESTAMP}' \
+                        -prune -exec rm -r {} \\;
+                """
+            }
+        }
+        failure {
+            echo "Pipeline failed."
+        }
+    }
+}
