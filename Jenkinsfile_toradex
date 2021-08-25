@@ -3,10 +3,13 @@ pipeline {
 
     environment {
         TORADEX_REPO_URL = "https://git.toradex.com/toradex-manifest.git \
-        -b dunfell-5.x.y -m tdxref/default.xml"
+            -b dunfell-5.x.y -m tdxref/default.xml"
         YOCTO_CACHE_DIR = "/var/jenkins_home/yocto"
-        CQFD_EXTRA_RUN_ARGS = "-v ${YOCTO_CACHE_DIR}/dl:/mnt/dl -e DL_DIR=/mnt/dl \
-        -v ${YOCTO_CACHE_DIR}/sstate:/mnt/sstate -e SSTATE_DIR=/mnt/sstate"
+        CQFD_EXTRA_RUN_ARGS = "\
+            -v ${YOCTO_CACHE_DIR}/dl:/mnt/dl \
+            -e DL_DIR=/mnt/dl \
+            -v ${YOCTO_CACHE_DIR}/sstate:/mnt/sstate \ 
+            -e SSTATE_DIR=/mnt/sstate"
         GIT_SSH_COMMAND = "ssh -o StrictHostKeyChecking=no"
         ANSIBLE_HOST_KEY_CHECKING = "False"
         BUILD_DIR = "build/tmp/deploy/images"
@@ -35,8 +38,7 @@ pipeline {
                     stage("2.2. Fetch base CI") {
                         sh """
                             git clone https://github.com/savoirfairelinux/base_ci.git
-                            """
-                        }
+                        """
                     }
                     stage("2.3. Fetch bash tools") {
                         sh"""
@@ -54,7 +56,7 @@ pipeline {
 
                             # Initialize CQFD
                             cqfd init
-                            """
+                        """
                     }
                     stage("2.5. Fetch cukinia repo") {
                         sh"""
@@ -105,7 +107,7 @@ pipeline {
                         cd base_ci/ansible
                         ansible-playbook playbooks/ci_restart_machine.yaml \
                             -i inventories/target_machine.yaml
-                        """
+                    """
                 }
             }
         }
